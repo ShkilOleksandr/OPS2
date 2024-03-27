@@ -10,6 +10,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define LIFE_SPAN 10
 #define MAX_NUM 10
@@ -24,7 +25,23 @@ typedef struct mqargs
     mqd_t pointer;
 }mqargs;
 
+volatile sig_atomic_t sigint = 0;
 
+int sethandler(void (*f)(int), int sigNo)
+{
+    struct sigaction act;
+    memset(&act, 0, sizeof(struct sigaction));
+    act.sa_handler = f;
+    if (-1 == sigaction(sigNo, &act, NULL))
+        return -1;
+    return 0;
+}
+
+void sigint_handler(int sig)
+{
+    if(sig == SIGINT)
+        sigint = 1;
+}
 
 static void tfunc(union sigval sv)
 {
@@ -66,6 +83,7 @@ void create_server_queue(int PID, mqargs* arg)
 
 void child_work(mqargs parent, mqargs result_channel)
 {
+    signal(SIGINT, SIG_IGN);
     char server_message[100];
     char result_message[100];
     int span = 5;
@@ -78,8 +96,13 @@ void child_work(mqargs parent, mqargs result_channel)
 
     while(span--)
     {
-        if(mq_receive(parent.pointer, server_message, 100, NULL) == -1)
+        if(TEMP_FAILURE_RETRY(mq_receive(parent.pointer, server_message, 100, NULL)) == -1)
             ERR("mq_receive");
+        if(server_message == "closing!\0")
+        {
+            printf("[%d] Server ordered to close!\n",getpid());
+            break;
+        }
         char* token = strtok(server_message, " ");
         int first = atoi(token);
         token = strtok(NULL," ");
@@ -103,8 +126,9 @@ void server_work(int n,mqargs parent)
     int counter = 5*n;
     parent.pointer = mq_open(parent.name, O_RDWR);
 
-    while(counter > 0)
+    while(sigint == 0)
     {
+        sleep(1);
         mq_getattr(parent.pointer, &attr);
         if(attr.mq_curmsgs == attr.mq_maxmsg)
             {
@@ -118,6 +142,10 @@ void server_work(int n,mqargs parent)
         mq_send(parent.pointer,task,100,1);
         printf("[%d]sending task to children!\n",getpid());
     }
+    snprintf(task,100,"closing!");
+    for(int i=0;i<n;i++)
+        mq_send(parent.pointer,task,100,1);
+
 }
 
 void create_children(int n, mqargs *server_queue, mqargs* children)
@@ -171,6 +199,7 @@ void usage(void)
 
 int main(int argc, char **argv)
 {
+    sethandler(sigint_handler,SIGINT);
     int n = atoi(argv[1]);
     srand(getpid());
     int t1 = rand()%4900 + 100;
