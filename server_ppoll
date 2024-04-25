@@ -1,0 +1,110 @@
+#include "sock_lib.h"
+#include <poll.h>
+#define MAX_CLIENTS 100
+
+sig_atomic_t var_sig = 0;
+
+void sig_assign(int signo)
+{
+    if(signo == SIGINT)
+    {
+        var_sig = 1;
+    }
+}
+int16_t digit_summer(int number)
+{
+    int16_t res = 0;
+    int i=0;
+    while(number > 0)
+    {
+        res += number % 10;
+        number /= 10;
+    }
+    return res;
+}
+
+void multiple_socket_server(int server_socket)
+{
+    int16_t calcs[100] = {0};
+    struct pollfd pollfds[100];
+    pollfds[0].fd = server_socket;
+    pollfds[0].events = POLLIN;
+    pollfds[0].revents = 0;
+    int current_nfd;
+    int nfd = 1;
+    int max_sum = 0;
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    while(var_sig == 0)
+    {
+        current_nfd = nfd;
+        int ret;
+        ret = ppoll(pollfds,current_nfd,0,&oldmask);
+        if (ret == -1) {
+            if (errno == EINTR) {
+                printf("SIGINT received, exiting loop.\n");
+                break;
+            } else {
+                perror("poll error");
+                break;
+            }
+        }
+        for(int i = 0 ; i < current_nfd; i++)
+        {
+            if(pollfds[i].fd <= 0) //stdin is unexpected that is why no 0
+                continue;
+
+            if((pollfds[i].revents & POLLIN) == POLLIN)
+            {
+                
+                if(pollfds[i].fd == server_socket)
+                {
+                    
+                    int new_client = add_new_client(server_socket);
+                    pollfds[nfd].fd = new_client;
+                    pollfds[nfd].events = (POLLIN);
+                    pollfds[nfd].revents = 0;
+                    nfd++;
+                }
+               else
+               {
+                    int16_t client_pid;
+                    int status = recv(pollfds[i].fd,&client_pid,
+                    sizeof(client_pid),0);
+                    calcs[i] = digit_summer(ntohs(client_pid));
+                    if(calcs[i] > max_sum)
+                        max_sum = calcs[i];
+                    pollfds[i].events |= POLLOUT;
+               }
+
+            }
+            else if((pollfds[i].revents & POLLOUT) == POLLOUT)
+            {
+                printf("Server : %d\n",calcs[i]);
+                calcs[i] = htons(calcs[i]);
+                send(pollfds[i].fd,&calcs[i],sizeof(calcs[i]),0);
+                
+                close(pollfds[i].fd);
+                pollfds[i].fd = -1;
+            }
+         
+        }
+    }
+    for(int i=1;i<nfd;i++)
+            {
+                if(pollfds[i].fd > 0)
+                    close(pollfds[i].fd);
+            }
+    printf("\nMax : %d\n",max_sum);
+            
+}
+int main(int argc, char **argv)
+{
+    sethandler(sig_assign,SIGINT);
+    struct sockaddr_un addr;
+    int server_socket = bind_tcp_socket((uint16_t)atoi(argv[1]),1);
+    multiple_socket_server(server_socket);
+    close(server_socket);
+    exit(EXIT_SUCCESS);
+}
