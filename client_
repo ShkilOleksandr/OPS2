@@ -1,0 +1,42 @@
+#include "sock_lib.h"
+#include <sys/wait.h>
+#define MAX_CLIENTS 10
+
+void server_communication(int server_socket)
+{
+    sleep(1);
+    int status;
+    int16_t server_calcs;
+    //snprintf(responce,100,"%d",getpid());
+    printf("My PID is : %d\n",getpid());
+    int16_t responce = ((int16_t)getpid());
+    responce = htons(responce);
+    send(server_socket,&responce,sizeof(responce),0);        
+    status = recv(server_socket,&server_calcs,sizeof(server_calcs),0);
+    printf("Server responce : %d\n",ntohs(server_calcs));
+    if(!status)
+    {
+        close(server_socket);
+        exit(EXIT_SUCCESS);
+    }
+        
+    
+}
+
+int main(int argc, char **argv)
+{
+    
+    for(int i=0;i<1;i++)
+    {
+        int st = fork();
+        if(st == 0)
+        {
+            int server;
+            server = connect_tcp_socket(argv[1],argv[2]);
+            server_communication(server);
+            exit(EXIT_SUCCESS);
+        }
+    }
+    while(wait(NULL)>0);
+    exit(EXIT_SUCCESS);
+}
