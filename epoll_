@@ -1,0 +1,84 @@
+#include "sock_lib.h"
+#include <poll.h>
+#define MAX_CLIENTS 100
+
+sig_atomic_t var_sig = 0;
+
+void sig_assign(int signo)
+{
+    if(signo == SIGINT)
+    {
+        var_sig = 1;
+    }
+}
+int16_t digit_summer(int number)
+{
+    int16_t res = 0;
+    int i=0;
+    while(number > 0)
+    {
+        res += number % 10;
+        number /= 10;
+    }
+    return res;
+}
+
+void multiple_socket_server(int server_socket)
+{
+    struct epoll_event event, events[100];
+    int epollfd = epoll_create1(0);
+    int event_count;
+    if(epollfd < 0)
+        ERR("epoll_creatr1");
+
+
+    event.events = EPOLLIN;
+    event.data.fd = server_socket;
+
+    if(epoll_ctl(epollfd,EPOLL_CTL_ADD,server_socket,&event))
+        { close(server_socket); close(epollfd); ERR("epoll_ctl");}
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+    
+    while(var_sig == 0)
+    {
+        event_count = epoll_pwait(epollfd,events,100,-1,&oldmask);
+        if(event_count < 0)
+        {
+            if(errno == EINTR)
+                break;
+            else
+                ERR("epoll_wait");
+        }
+        for(int i=0;i<event_count;i++)
+        {
+            int client_socket = add_new_client(server_socket);
+            int16_t number;
+            recv(client_socket,&number,sizeof(number),0);
+            number = ntohs(number);
+            printf("Client : %d\n",number);
+            number = digit_summer(number);
+            printf("Server : %d\n",number);
+            number = htons(number);
+            send(client_socket,&number,sizeof(number),0);
+
+        }
+    
+    }
+    if(close(epollfd))
+        ERR("close");
+            
+}
+int main(int argc, char **argv)
+{
+    sethandler(sig_assign,SIGINT);
+    struct sockaddr_un addr;
+    int server_socket = bind_tcp_socket((uint16_t)atoi(argv[1]),1);
+    int new_flags = fcntl(server_socket, F_GETFL) | O_NONBLOCK;
+    fcntl(server_socket, F_SETFL, new_flags);
+    multiple_socket_server(server_socket);
+    close(server_socket);
+    exit(EXIT_SUCCESS);
+}
