@@ -1,0 +1,175 @@
+#include "lib.h"
+#define BACKLOG 3
+#define MAX_EVENTS 16
+
+volatile sig_atomic_t do_work = 1;
+
+void sigint_handler(int sig) { do_work = 0; }
+
+void usage(char *name) { fprintf(stderr, "USAGE: %s socket port\n", name); }
+
+void calculate(int32_t data[5])
+{
+    int32_t op1, op2, result = -1, status = 1;
+    op1 = ntohl(data[0]);
+    op2 = ntohl(data[1]);
+    switch ((char)ntohl(data[3]))
+    {
+        case '+':
+            result = op1 + op2;
+            break;
+        case '-':
+            result = op1 - op2;
+            break;
+        case '*':
+            result = op1 * op2;
+            break;
+        case '/':
+            if (!op2)
+                status = 0;
+            else
+                result = op1 / op2;
+            break;
+        default:
+            status = 0;
+    }
+    data[4] = htonl(status);
+    data[2] = htonl(result);
+}
+
+void remove_sfd(int sfd, int sfds[])
+{
+    int found = 0;
+    for(int i=0;i<6;i++)
+    {
+        if(sfds[i] == sfd)
+        {
+            found = 1;
+        }
+        if(found)
+            sfds[i] = sfds[i + 1];
+    }
+}
+
+void doServer(int tcp_listen_socket, int output_file)
+{
+    int new_flags;
+    
+    char buffer_denial[100] = "Already 6 clients!\0";
+    int epoll_descriptor;
+    if ((epoll_descriptor = epoll_create1(0)) < 0)
+    {
+        ERR("epoll_create:");
+    }
+    struct epoll_event event, events[MAX_EVENTS];
+    event.events = EPOLLIN;
+    event.data.fd = tcp_listen_socket;
+    if (epoll_ctl(epoll_descriptor, EPOLL_CTL_ADD, tcp_listen_socket, &event) == -1)
+    {
+        perror("epoll_ctl: listen_sock");
+        exit(EXIT_FAILURE);
+    }
+    //for future clients:
+    event.events = EPOLLIN | EPOLLOUT;
+    int connected = 0;
+    int connected_descriptors[7];
+    int nfds;
+    int32_t data[5];
+    ssize_t size;
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+   // sigaddset(&mask, SIGINT);
+   // sigprocmask(SIG_BLOCK, &mask, &oldmask);
+    while (do_work)
+    {
+        if ((nfds = epoll_pwait(epoll_descriptor, events, MAX_EVENTS, -1, &oldmask)) > 0)
+        {
+            if(errno == EINTR)
+                break;
+            for (int n = 0; n < nfds; n++)
+            {
+                if(events[n].data.fd <= 1)
+                    continue;
+                if(events[n].data.fd == tcp_listen_socket)
+                {
+                    write(0, "Entered the adding\n\0", 20);
+                    int new_client = add_new_client(tcp_listen_socket);
+                    if(connected == 6)
+                    {
+                        send(new_client, buffer_denial, sizeof(buffer_denial),0);
+                        if(close(new_client)<0)
+                            ERR("close");
+                        continue;
+                    }
+                    event.data.fd = new_client;
+                    if (epoll_ctl(epoll_descriptor, EPOLL_CTL_ADD, new_client, &event) == -1)
+                    {
+                        perror("epoll_ctl: listen_sock");
+                        exit(EXIT_FAILURE);
+                    }
+                    new_flags = fcntl(new_client, F_GETFL) | O_NONBLOCK;
+                    fcntl(new_client, F_SETFL, new_flags);
+                    connected_descriptors[connected] = new_client;
+                    connected++;
+                    write(0, "Left the adding\n\0", 17);
+                    continue;
+                }
+                char buff[100] = {0};
+                if((events[n].events & EPOLLIN) == EPOLLIN)
+                {
+                    char buff2[100]={0};
+                    int status = recv(events[n].data.fd, buff, 10, 0);
+                    if(status == 0)
+                        {
+                            remove_sfd(events[n].data.fd, connected_descriptors);
+                            connected--;
+                            close(events[n].data.fd);
+                            continue;
+                        }
+                    status = recv(events[n].data.fd, buff2, sizeof(buff2), 0);
+                    if(status > 0)
+                    {
+                        bulk_write(events[n].data.fd, "Too big packet!\n\0",17);
+                        continue;
+                    }
+                    bulk_write(output_file, buff, strlen(buff));
+                    bulk_write(events[n].data.fd, "Received\n\0",10);
+                }               
+            }
+        }
+        else
+        {
+            if (errno == EINTR)
+                continue;
+            ERR("epoll_pwait");
+        }
+    }
+    for(int i=0;i<connected;i++)
+    {
+        close(connected_descriptors[i]);
+    }
+    if (TEMP_FAILURE_RETRY(close(epoll_descriptor)) < 0)
+        ERR("close");
+    sigprocmask(SIG_UNBLOCK, &mask, NULL);
+}
+
+int main(int argc, char **argv)
+{
+    int tcp_listen_socket;
+    int new_flags;
+    if (sethandler(SIG_IGN, SIGPIPE))
+        ERR("Seting SIGPIPE:");
+    if (sethandler(sigint_handler, SIGINT))
+        ERR("Seting SIGINT:");
+    tcp_listen_socket = bind_tcp_socket(atoi(argv[1]), BACKLOG);
+    new_flags = fcntl(tcp_listen_socket, F_GETFL) | O_NONBLOCK;
+    fcntl(tcp_listen_socket, F_SETFL, new_flags);
+    int output_file = open("file.txt", O_RDWR | O_CREAT | O_TRUNC);
+    doServer(tcp_listen_socket, output_file);
+    if (TEMP_FAILURE_RETRY(close(tcp_listen_socket)) < 0)
+        ERR("close");
+    if (TEMP_FAILURE_RETRY(close(output_file)) < 0)
+        ERR("close");
+    fprintf(stderr, "Server has terminated.\n");
+    return EXIT_SUCCESS;
+}
