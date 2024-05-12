@@ -1,0 +1,288 @@
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+#include <signal.h>
+
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+
+
+#include <sys/stat.h>
+#include <sys/types.h>
+
+
+#define MIN_STUDENTS 4
+#define MAX_STUDENTS 20
+
+#define ERR(source) \
+    (fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), perror(source), kill(0, SIGKILL), exit(EXIT_FAILURE))
+
+#ifndef TEMP_FAILURE_RETRY
+#define TEMP_FAILURE_RETRY(expression)             \
+    (__extension__({                               \
+        long int __result;                         \
+        do                                         \
+            __result = (long int)(expression);     \
+        while (__result == -1L && errno == EINTR); \
+        __result;                                  \
+    }))
+#endif
+
+int sethandler(void (*f)(int), int sigNo)
+{
+    struct sigaction act;
+    memset(&act, 0, sizeof(struct sigaction));
+    act.sa_handler = f;
+    if (-1 == sigaction(sigNo, &act, NULL))
+        return -1;
+    return 0;
+}
+
+typedef struct connection
+{
+    char fifo_name[20];
+    int pid;
+}connection;
+
+int alarm_ = 0;
+
+int set_handler(void (*f)(int), int sig)
+{
+    struct sigaction act = {0};
+    act.sa_handler = f;
+    if (sigaction(sig, &act, NULL) == -1)
+        return -1;
+    return 0;
+}
+
+void alarm_receiver(int sig)
+{
+    if(sig  == SIGALRM)
+        alarm_ = 1;
+}
+void child_job(connection individual, connection shared)
+{
+    srand(time(NULL));
+    int from_teacher;
+    int to_teacher;
+
+    if((from_teacher = open(individual.fifo_name, O_RDONLY)) < 0)
+        ERR("open");
+
+    if((to_teacher = open(shared.fifo_name, O_WRONLY)) < 0)
+        ERR("open");
+    
+    char teacher[100];
+    read(from_teacher, teacher, sizeof(teacher));
+    snprintf(teacher, sizeof(teacher), "Student [%d] : I am HERE!\n",getpid());
+    write(to_teacher, teacher, sizeof(teacher));
+    printf("%s",teacher);
+    //presence check done
+
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGALRM);
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+
+    int t = rand()%401 + 100;
+    struct timespec waiting;
+    waiting.tv_sec = 0;
+    waiting.tv_nsec = (t%1000)*1000000;
+    
+
+    int k = rand()%7 + 3; 
+    int q = rand()%19 + 1;
+
+    char stage_report[100];
+    ((int*)stage_report)[0] = k + q;
+    ((int*)stage_report)[1] = getpid();
+    int current;
+
+    for(int i=0;i<5;i++)
+    {
+        nanosleep(&waiting, NULL);
+        //printf("student [ %d ] doing stage %d\n", getpid(), i+1);
+        q = rand()%19 + 1;
+        ((int*)stage_report)[0] = k + q;
+        ((int*)stage_report)[1] = getpid();
+        TEMP_FAILURE_RETRY(write(to_teacher, stage_report, 2*sizeof(int)));
+
+        TEMP_FAILURE_RETRY(read(from_teacher,teacher,sizeof(int)));
+        if(*(int*)teacher==-2)
+        {
+            current = i;
+            i = 100;
+            continue;
+        }
+        if(*(int*)teacher)
+            i--;
+        //printf("In the loop\n");
+    }
+    fflush(stdout);
+    if(*(int*)teacher == -2)
+    {       
+            fflush(stdout);
+            printf("Student [ %d ] not finished %d\n", getpid(), current+1);
+    }
+    else
+    {
+        fflush(stdout);
+        printf("[%d] Student : I nailed it!\n",getpid());
+    }
+    fflush(stdout);
+    
+    ((int*)stage_report)[0] = -1;
+    ((int*)stage_report)[1] = getpid();
+    write(to_teacher, stage_report, 2*sizeof(int));
+    if(close(from_teacher))
+        ERR("close");
+    if(close(to_teacher))
+        ERR("close");
+    fflush(stdout);
+    //printf("Student after closing\n");
+}
+
+int find_index(connection indi[],int n, int pid)
+{
+    for(int i=0;i<n;i++)
+    {
+        if(indi[i].pid == pid)
+            return i;
+    }
+    return -1;
+}
+
+void parent_work(connection individual[], int n, connection shared)
+{
+    sethandler(alarm_receiver,SIGALRM);
+    int* individual_descriptors = (int*)malloc(sizeof(int)*n);
+    int shared_descriptor;
+    for(int i=0;i<n;i++)
+    {
+        if ((individual_descriptors[i] = open(individual[i].fifo_name, O_WRONLY)) < 0)
+            ERR("open");
+    }
+    if ((shared_descriptor = open(shared.fifo_name, O_RDONLY)) < 0)
+            ERR("open");
+
+    //sending messages
+    char buffer[100]={0};
+    int ready_students[20]={0};
+    for(int i=0;i<n;i++)
+    {
+        snprintf(buffer, sizeof(buffer), "Is [%d] here?\n", individual[i].pid);
+        write(individual_descriptors[i],buffer, sizeof(buffer));
+        printf("Is student [%d] here?\n", individual[i].pid);
+    }
+    alarm(3);
+    //presence has been checked;
+    char student[100];
+    int ready = 0;
+    while(ready < n)
+    {
+        if(alarm_)
+        {
+            for(int i=0;i<n;i++)
+            {
+                if(ready_students[i])
+                    continue;
+            
+                ((int*)student)[0] = -2;
+                write(individual_descriptors[i], student, sizeof(int));
+            }
+
+            break;
+        }
+        
+        read(shared_descriptor,student, 2*sizeof(int));
+        int index = find_index(individual, n, ((int*)student)[1]);
+        if(((int*)student)[0] == -1)
+            {
+                ready_students[index] = 1;
+                ready++;
+                continue;
+            }
+        
+        int d = rand()%20 + 1;
+        if(((int*)student)[0] >= d)
+            {
+                
+                ((int*)student)[0] = 0;
+                write(individual_descriptors[index], student, sizeof(int));
+            }
+        else
+            {
+                ((int*)student)[0] = 1;
+                write(individual_descriptors[index], student, sizeof(int));
+                 //printf("after\n");
+            }
+       
+    }
+    
+    //fflush(stdout);
+    while(wait(NULL)>0);
+    for(int i=0;i<n;i++)
+    {
+        if(close(individual_descriptors[i]))
+            ERR("close");
+    }
+    if(close(shared_descriptor))
+        ERR("close");
+    free(individual_descriptors);
+}
+
+void usage(char* name)
+{
+    fprintf(stderr, "USAGE: %s N M\n", name);
+    fprintf(stderr, "N: 4 <= N <= 20 - number of students\n");
+    exit(EXIT_FAILURE);
+}
+
+int main(int argc, char** argv)
+{
+    int n;
+
+    if (argc != 2)
+        usage(argv[0]);
+
+    n = atoi(argv[1]);
+
+    int fork_status;
+    connection individual_pipes[n];
+    connection shared_pipe;
+    //char fifo_name[100];
+    for(int i=0;i<n;i++)
+    {
+        snprintf(individual_pipes[i].fifo_name, sizeof(individual_pipes[i].fifo_name), "student_%d", i + 1);
+        if (mkfifo(individual_pipes[i].fifo_name, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+            if (errno != EEXIST)
+                ERR("create fifo");
+    }
+    snprintf(shared_pipe.fifo_name, sizeof(shared_pipe.fifo_name), "Teacher");
+        if (mkfifo(shared_pipe.fifo_name, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+            if (errno != EEXIST)
+                ERR("create fifo");
+
+    for(int i=0;i<n;i++)
+    {
+        fflush(stdout);
+        fork_status = fork();
+        switch(fork_status)
+        {
+            case 0:
+                child_job(individual_pipes[i], shared_pipe);
+                exit(EXIT_SUCCESS);
+            default:
+                individual_pipes[i].pid = fork_status;
+        }
+    }
+    parent_work(individual_pipes,n,shared_pipe);
+
+    printf("IT IS FINALLY OVER!\n");
+    exit(EXIT_SUCCESS);
+}
